@@ -1,9 +1,8 @@
 "use client"
 
 import type React from "react"
-
-import { useState } from "react"
-import { ChevronDown, GripVertical, X, ChevronRight, ChevronLeft } from "lucide-react"
+import { useState, useCallback } from "react"
+import { ChevronDown, GripVertical, X } from "lucide-react"
 import { cn } from "@/lib/utils"
 
 export interface MenuItem {
@@ -25,6 +24,12 @@ export interface DraggableMenuProps {
   showRemoveButton?: boolean
 }
 
+type DropZone = {
+  id: string
+  position: "before" | "after" | "inside"
+  level: number
+}
+
 export const DraggableMenu = ({
   items,
   onItemsChange,
@@ -37,140 +42,249 @@ export const DraggableMenu = ({
   showDragHandle = true,
   showRemoveButton = true,
 }: DraggableMenuProps) => {
-  const [draggedItem, setDraggedItem] = useState<string | null>(null)
-  const [dragOverItem, setDragOverItem] = useState<string | null>(null)
-  const [dragPosition, setDragPosition] = useState<"above" | "below" | null>(null)
+  const [draggedId, setDraggedId] = useState<string | null>(null)
+  const [dropZone, setDropZone] = useState<DropZone | null>(null)
 
-  const handleDragStart = (e: React.DragEvent, id: string) => {
-    setDraggedItem(id)
-    e.dataTransfer!.effectAllowed = "move"
-    e.dataTransfer!.setData("text/plain", id)
-  }
+  const removeItemFromTree = useCallback((tree: MenuItem[], id: string): [MenuItem | null, MenuItem[]] => {
+    let removed: MenuItem | null = null
 
-  const handleDragOver = (e: React.DragEvent, id: string) => {
-    e.preventDefault()
-    e.dataTransfer!.dropEffect = "move"
+    const newTree = tree.reduce<MenuItem[]>((acc, item) => {
+      if (item.id === id) {
+        removed = { ...item, children: item.children ? [...item.children] : undefined }
+        return acc
+      }
 
-    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
-    const midpoint = rect.height / 2
-    const position = e.clientY - rect.top < midpoint ? "above" : "below"
+      if (item.children && item.children.length > 0) {
+        const [childRemoved, newChildren] = removeItemFromTree(item.children, id)
+        if (childRemoved) removed = childRemoved
+        acc.push({
+          ...item,
+          children: newChildren.length > 0 ? newChildren : undefined,
+        })
+      } else {
+        acc.push({ ...item })
+      }
 
-    setDragOverItem(id)
-    setDragPosition(position)
-  }
+      return acc
+    }, [])
 
-  const handleDragLeave = () => {
-    setDragOverItem(null)
-    setDragPosition(null)
-  }
+    return [removed, newTree]
+  }, [])
 
-  const handleDrop = (e: React.DragEvent, targetId: string) => {
-    e.preventDefault()
-    e.stopPropagation()
+  const insertItemInTree = useCallback(
+    (tree: MenuItem[], item: MenuItem, targetId: string, position: "before" | "after" | "inside"): MenuItem[] => {
+      // Handle "inside" - add as child of target
+      if (position === "inside") {
+        return tree.map((node) => {
+          if (node.id === targetId) {
+            return {
+              ...node,
+              children: [...(node.children || []), item],
+            }
+          }
+          if (node.children) {
+            return {
+              ...node,
+              children: insertItemInTree(node.children, item, targetId, position),
+            }
+          }
+          return node
+        })
+      }
 
-    if (draggedItem && draggedItem !== targetId) {
-      const flatList = flattenWithParent(items)
-      const draggedIdx = flatList.findIndex((x) => x.id === draggedItem)
-      const targetIdx = flatList.findIndex((x) => x.id === targetId)
+      // Handle "before" and "after" at current level
+      const result: MenuItem[] = []
+      let inserted = false
 
-      if (draggedIdx !== -1 && targetIdx !== -1) {
-        const newFlatList = [...flatList]
-        const [draggedEntry] = newFlatList.splice(draggedIdx, 1)
+      for (const node of tree) {
+        if (node.id === targetId) {
+          if (position === "before") {
+            result.push(item)
+            result.push({ ...node, children: node.children ? [...node.children] : undefined })
+          } else {
+            result.push({ ...node, children: node.children ? [...node.children] : undefined })
+            result.push(item)
+          }
+          inserted = true
+        } else if (node.children && node.children.length > 0) {
+          const newChildren = insertItemInTree(node.children, item, targetId, position)
+          // Check if item was inserted in children
+          const wasInsertedInChildren =
+            newChildren.length !== node.children.length || JSON.stringify(newChildren) !== JSON.stringify(node.children)
 
-        const insertIdx = dragPosition === "above" ? targetIdx : targetIdx + (draggedIdx < targetIdx ? 0 : 1)
-        newFlatList.splice(insertIdx > draggedIdx ? insertIdx - 1 : insertIdx, 0, draggedEntry)
-
-        const rebuilt = rebuildTreeFromFlat(newFlatList)
-        if (onItemsChange) {
-          onItemsChange(rebuilt)
+          if (wasInsertedInChildren) {
+            inserted = true
+          }
+          result.push({ ...node, children: newChildren })
+        } else {
+          result.push({ ...node })
         }
       }
+
+      return result
+    },
+    [],
+  )
+
+  const isDescendant = useCallback((tree: MenuItem[], parentId: string, targetId: string): boolean => {
+    const findInChildren = (items: MenuItem[]): boolean => {
+      for (const item of items) {
+        if (item.id === parentId) {
+          // Found the parent, now check if target is in its subtree
+          const checkSubtree = (nodes: MenuItem[]): boolean => {
+            for (const node of nodes) {
+              if (node.id === targetId) return true
+              if (node.children && checkSubtree(node.children)) return true
+            }
+            return false
+          }
+          return item.children ? checkSubtree(item.children) : false
+        }
+        if (item.children && findInChildren(item.children)) return true
+      }
+      return false
     }
+    return findInChildren(tree)
+  }, [])
 
-    setDraggedItem(null)
-    setDragOverItem(null)
-    setDragPosition(null)
-  }
+  const handleDragStart = useCallback((e: React.DragEvent, id: string) => {
+    setDraggedId(id)
+    e.dataTransfer.effectAllowed = "move"
+    e.dataTransfer.setData("text/plain", id)
 
-  const handleDragEnd = () => {
-    setDraggedItem(null)
-    setDragOverItem(null)
-    setDragPosition(null)
-  }
+    // Add drag image with slight delay for better visual
+    const target = e.currentTarget as HTMLElement
+    target.style.opacity = "0.5"
+  }, [])
 
-  const handleRemove = (id: string) => {
-    if (onRemoveItem) {
-      onRemoveItem(id)
+  const handleDragEnd = useCallback((e: React.DragEvent) => {
+    const target = e.currentTarget as HTMLElement
+    target.style.opacity = "1"
+    setDraggedId(null)
+    setDropZone(null)
+  }, [])
+
+  const handleDragOver = useCallback(
+    (e: React.DragEvent, id: string, level: number, hasChildren: boolean) => {
+      e.preventDefault()
+      e.stopPropagation()
+
+      if (draggedId === id) return
+
+      const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
+      const y = e.clientY - rect.top
+      const height = rect.height
+      const x = e.clientX - rect.left
+
+      // Determine position based on vertical mouse position
+      let position: "before" | "after" | "inside"
+
+      if (y < height * 0.25) {
+        position = "before"
+      } else if (y > height * 0.75) {
+        position = "after"
+      } else {
+        // Middle zone - if dragging to the right side and target can have children, nest inside
+        if (x > rect.width * 0.3) {
+          position = "inside"
+        } else {
+          position = y < height * 0.5 ? "before" : "after"
+        }
+      }
+
+      setDropZone({ id, position, level })
+    },
+    [draggedId],
+  )
+
+  const handleDragLeave = useCallback((e: React.DragEvent) => {
+    // Only clear if leaving the component entirely
+    const relatedTarget = e.relatedTarget as HTMLElement
+    if (!relatedTarget || !e.currentTarget.contains(relatedTarget)) {
+      // Don't clear immediately to prevent flickering
     }
-  }
+  }, [])
 
-  const handleToggleExpand = (id: string) => {
-    if (onToggleExpand) {
-      onToggleExpand(id)
-    }
-  }
+  const handleDrop = useCallback(
+    (e: React.DragEvent) => {
+      e.preventDefault()
+      e.stopPropagation()
 
-  const handlePromote = (id: string) => {
-    const flatList = flattenWithParent(items)
-    const item = flatList.find((x) => x.id === id)
+      if (!draggedId || !dropZone || draggedId === dropZone.id) {
+        setDraggedId(null)
+        setDropZone(null)
+        return
+      }
 
-    if (item && item.parentId) {
-      // Move item up one level
-      item.parentId = flatList.find((x) => x.id === item.parentId)?.parentId || null
-      const rebuilt = rebuildTreeFromFlat(flatList)
+      // Prevent dropping parent into its own children
+      if (isDescendant(items, draggedId, dropZone.id)) {
+        setDraggedId(null)
+        setDropZone(null)
+        return
+      }
+
+      // Remove dragged item from tree
+      const [removedItem, treeWithoutDragged] = removeItemFromTree(items, draggedId)
+
+      if (!removedItem) {
+        setDraggedId(null)
+        setDropZone(null)
+        return
+      }
+
+      // Insert at new position
+      const newTree = insertItemInTree(treeWithoutDragged, removedItem, dropZone.id, dropZone.position)
+
       if (onItemsChange) {
-        onItemsChange(rebuilt)
-      }
-    }
-  }
-
-  const handleDemote = (id: string) => {
-    const flatList = flattenWithParent(items)
-    const itemIdx = flatList.findIndex((x) => x.id === id)
-
-    if (itemIdx > 0) {
-      const prevItem = flatList[itemIdx - 1]
-      // Make current item a child of the previous item
-      const item = flatList[itemIdx]
-      item.parentId = prevItem.id
-
-      // Ensure previous item has children array
-      if (!prevItem.children) {
-        prevItem.children = []
+        onItemsChange(newTree)
       }
 
-      const rebuilt = rebuildTreeFromFlat(flatList)
-      if (onItemsChange) {
-        onItemsChange(rebuilt)
+      setDraggedId(null)
+      setDropZone(null)
+    },
+    [draggedId, dropZone, items, isDescendant, removeItemFromTree, insertItemInTree, onItemsChange],
+  )
+
+  const handleRemove = useCallback(
+    (id: string) => {
+      if (onRemoveItem) {
+        onRemoveItem(id)
       }
-    }
-  }
+    },
+    [onRemoveItem],
+  )
+
+  const handleToggleExpand = useCallback(
+    (id: string) => {
+      if (onToggleExpand) {
+        onToggleExpand(id)
+      }
+    },
+    [onToggleExpand],
+  )
 
   return (
-    <div className={cn("w-full space-y-0", className)}>
-      {items.map((item) => (
+    <div className={cn("w-full", className)} onDragOver={(e) => e.preventDefault()} onDrop={handleDrop}>
+      {items.map((item, index) => (
         <MenuItemComponent
           key={item.id}
           item={item}
+          index={index}
           level={0}
-          draggedItem={draggedItem}
-          dragOverItem={dragOverItem}
-          dragPosition={dragPosition}
+          draggedId={draggedId}
+          dropZone={dropZone}
           expandedItems={expandedItems}
           onDragStart={handleDragStart}
+          onDragEnd={handleDragEnd}
           onDragOver={handleDragOver}
           onDragLeave={handleDragLeave}
           onDrop={handleDrop}
-          onDragEnd={handleDragEnd}
           onRemove={handleRemove}
           onToggleExpand={handleToggleExpand}
-          onPromote={handlePromote}
-          onDemote={handleDemote}
           itemClassName={itemClassName}
           childrenClassName={childrenClassName}
           showDragHandle={showDragHandle}
           showRemoveButton={showRemoveButton}
-          canPromote={false}
         />
       ))}
     </div>
@@ -179,84 +293,93 @@ export const DraggableMenu = ({
 
 interface MenuItemComponentProps {
   item: MenuItem
+  index: number
   level: number
-  draggedItem: string | null
-  dragOverItem: string | null
-  dragPosition: "above" | "below" | null
+  draggedId: string | null
+  dropZone: DropZone | null
   expandedItems: Set<string>
   onDragStart: (e: React.DragEvent, id: string) => void
-  onDragOver: (e: React.DragEvent, id: string) => void
-  onDragLeave: () => void
-  onDrop: (e: React.DragEvent, id: string) => void
-  onDragEnd: () => void
+  onDragEnd: (e: React.DragEvent) => void
+  onDragOver: (e: React.DragEvent, id: string, level: number, hasChildren: boolean) => void
+  onDragLeave: (e: React.DragEvent) => void
+  onDrop: (e: React.DragEvent) => void
   onRemove: (id: string) => void
   onToggleExpand: (id: string) => void
-  onPromote: (id: string) => void
-  onDemote: (id: string) => void
   itemClassName?: string
   childrenClassName?: string
   showDragHandle: boolean
   showRemoveButton: boolean
-  canPromote: boolean
 }
 
 const MenuItemComponent = ({
   item,
+  index,
   level,
-  draggedItem,
-  dragOverItem,
-  dragPosition,
+  draggedId,
+  dropZone,
   expandedItems,
   onDragStart,
+  onDragEnd,
   onDragOver,
   onDragLeave,
   onDrop,
-  onDragEnd,
   onRemove,
   onToggleExpand,
-  onPromote,
-  onDemote,
   itemClassName,
   childrenClassName,
   showDragHandle,
   showRemoveButton,
-  canPromote,
 }: MenuItemComponentProps) => {
   const hasChildren = item.children && item.children.length > 0
   const isExpanded = expandedItems.has(item.id)
-  const isDragging = draggedItem === item.id
-  const isDropTarget = dragOverItem === item.id
+  const isDragging = draggedId === item.id
+  const isDropTarget = dropZone?.id === item.id
+
+  const showDropBefore = isDropTarget && dropZone?.position === "before"
+  const showDropAfter = isDropTarget && dropZone?.position === "after"
+  const showDropInside = isDropTarget && dropZone?.position === "inside"
 
   return (
-    <>
-      {/* Drop indicator above */}
-      {isDropTarget && dragPosition === "above" && <div className="h-0.5 bg-primary mx-4 rounded-full" />}
+    <div className="relative">
+      <div
+        className={cn(
+          "absolute left-0 right-0 h-0.5 bg-primary rounded-full transition-all duration-150 ease-out z-10",
+          showDropBefore ? "opacity-100 scale-x-100" : "opacity-0 scale-x-0",
+        )}
+        style={{
+          top: -1,
+          marginLeft: level * 24 + 16,
+          marginRight: 16,
+        }}
+      />
 
       {/* Main menu item */}
       <div
         draggable
         onDragStart={(e) => onDragStart(e, item.id)}
-        onDragOver={(e) => onDragOver(e, item.id)}
-        onDragLeave={onDragLeave}
-        onDrop={(e) => onDrop(e, item.id)}
         onDragEnd={onDragEnd}
+        onDragOver={(e) => onDragOver(e, item.id, level, hasChildren || false)}
+        onDragLeave={onDragLeave}
+        onDrop={onDrop}
         className={cn(
-          "flex items-center gap-2 px-4 py-3 border border-border rounded-md cursor-move transition-all duration-150 ease-out",
-          isDragging && "opacity-30 scale-95 shadow-md",
-          isDropTarget && dragPosition === "below" && "border-primary/70 bg-primary/5",
-          !isDragging && !isDropTarget && "hover:bg-accent/30",
+          "flex items-center gap-2 px-4 py-3 border border-border bg-background cursor-grab active:cursor-grabbing",
+          "transition-all duration-200 ease-out",
+          isDragging && "opacity-40 scale-[0.98] shadow-lg ring-2 ring-primary/20",
+          showDropInside && "ring-2 ring-primary bg-primary/5 scale-[1.01]",
+          !isDragging && !isDropTarget && "hover:bg-accent/50 hover:border-accent-foreground/20",
           itemClassName,
         )}
         style={{
-          marginLeft: level > 0 ? `${level * 24}px` : 0,
+          marginLeft: level * 24,
+          borderRadius: "0.375rem",
         }}
       >
         {/* Drag handle */}
         {showDragHandle && (
           <GripVertical
             className={cn(
-              "h-4 w-4 flex-shrink-0 transition-colors duration-150",
-              isDragging ? "text-muted-foreground/40" : "text-muted-foreground",
+              "h-5 w-5 flex-shrink-0 text-muted-foreground transition-colors duration-150",
+              "hover:text-foreground",
             )}
           />
         )}
@@ -264,8 +387,15 @@ const MenuItemComponent = ({
         {/* Expand/Collapse toggle */}
         {hasChildren ? (
           <button
-            onClick={() => onToggleExpand(item.id)}
-            className="flex-shrink-0 p-2 h-8 w-8 flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-muted rounded transition-all duration-200"
+            onClick={(e) => {
+              e.stopPropagation()
+              onToggleExpand(item.id)
+            }}
+            className={cn(
+              "flex-shrink-0 p-1.5 h-8 w-8 flex items-center justify-center rounded",
+              "text-muted-foreground hover:text-foreground hover:bg-muted",
+              "transition-all duration-200 ease-out",
+            )}
             aria-label={isExpanded ? "Collapse" : "Expand"}
           >
             <ChevronDown
@@ -280,40 +410,27 @@ const MenuItemComponent = ({
         <span
           onClick={() => hasChildren && onToggleExpand(item.id)}
           className={cn(
-            "flex-1 font-medium text-foreground transition-colors duration-150",
+            "flex-1 font-medium text-foreground select-none",
+            "transition-colors duration-150",
             hasChildren && "cursor-pointer hover:text-primary",
           )}
         >
           {item.label}
         </span>
 
-        {level > 0 && (
-          <button
-            onClick={() => onPromote(item.id)}
-            className="flex-shrink-0 p-1 text-muted-foreground hover:text-foreground transition-all duration-150 rounded hover:bg-muted hover:scale-110"
-            title="Promote to parent level"
-            aria-label="Promote item"
-          >
-            <ChevronLeft className="h-4 w-4" />
-          </button>
-        )}
-
-        {level === 0 && (
-          <button
-            onClick={() => onDemote(item.id)}
-            className="flex-shrink-0 p-1 text-muted-foreground hover:text-foreground transition-all duration-150 rounded hover:bg-muted hover:scale-110"
-            title="Demote to child of previous item"
-            aria-label="Demote item"
-          >
-            <ChevronRight className="h-4 w-4" />
-          </button>
-        )}
-
         {/* Remove button */}
         {showRemoveButton && (
           <button
-            onClick={() => onRemove(item.id)}
-            className="flex-shrink-0 p-1 text-muted-foreground hover:text-foreground transition-all duration-150 rounded hover:bg-muted hover:scale-110"
+            onClick={(e) => {
+              e.stopPropagation()
+              onRemove(item.id)
+            }}
+            className={cn(
+              "flex-shrink-0 p-1.5 rounded",
+              "text-muted-foreground hover:text-destructive hover:bg-destructive/10",
+              "transition-all duration-150 ease-out",
+              "opacity-60 hover:opacity-100",
+            )}
             aria-label="Remove item"
           >
             <X className="h-4 w-4" />
@@ -321,86 +438,52 @@ const MenuItemComponent = ({
         )}
       </div>
 
-      {/* Drop indicator below */}
-      {isDropTarget && dragPosition === "below" && <div className="h-0.5 bg-primary mx-4 rounded-full" />}
+      <div
+        className={cn(
+          "absolute left-0 right-0 h-0.5 bg-primary rounded-full transition-all duration-150 ease-out z-10",
+          showDropAfter ? "opacity-100 scale-x-100" : "opacity-0 scale-x-0",
+        )}
+        style={{
+          bottom: -1,
+          marginLeft: level * 24 + 16,
+          marginRight: 16,
+        }}
+      />
 
-      {/* Children items */}
-      {hasChildren && isExpanded && (
+      {/* Children items with smooth animation */}
+      {hasChildren && (
         <div
-          className={cn(
-            "space-y-0 overflow-hidden animate-in fade-in slide-in-from-top-2 duration-200",
-            childrenClassName,
-          )}
+          className={cn("overflow-hidden transition-all duration-300 ease-out", childrenClassName)}
+          style={{
+            maxHeight: isExpanded ? `${item.children!.length * 100}px` : "0px",
+            opacity: isExpanded ? 1 : 0,
+            transform: isExpanded ? "translateY(0)" : "translateY(-8px)",
+          }}
         >
-          {item.children!.map((child) => (
+          {item.children!.map((child, childIndex) => (
             <MenuItemComponent
               key={child.id}
               item={child}
+              index={childIndex}
               level={level + 1}
-              draggedItem={draggedItem}
-              dragOverItem={dragOverItem}
-              dragPosition={dragPosition}
+              draggedId={draggedId}
+              dropZone={dropZone}
               expandedItems={expandedItems}
               onDragStart={onDragStart}
+              onDragEnd={onDragEnd}
               onDragOver={onDragOver}
               onDragLeave={onDragLeave}
               onDrop={onDrop}
-              onDragEnd={onDragEnd}
               onRemove={onRemove}
               onToggleExpand={onToggleExpand}
-              onPromote={onPromote}
-              onDemote={onDemote}
               itemClassName={itemClassName}
               childrenClassName={childrenClassName}
               showDragHandle={showDragHandle}
               showRemoveButton={showRemoveButton}
-              canPromote={true}
             />
           ))}
         </div>
       )}
-    </>
+    </div>
   )
-}
-
-interface FlatItem extends MenuItem {
-  parentId: string | null
-}
-
-function flattenWithParent(items: MenuItem[], parentId: string | null = null): FlatItem[] {
-  const result: FlatItem[] = []
-  items.forEach((item) => {
-    result.push({ ...item, parentId })
-    if (item.children) {
-      result.push(...flattenWithParent(item.children, item.id))
-    }
-  })
-  return result
-}
-
-function rebuildTreeFromFlat(flatList: FlatItem[]): MenuItem[] {
-  const itemMap = new Map<string, MenuItem>()
-
-  // Create all items first
-  flatList.forEach((item) => {
-    itemMap.set(item.id, {
-      id: item.id,
-      label: item.label,
-      children: [],
-    })
-  })
-
-  // Rebuild relationships
-  flatList.forEach((item) => {
-    if (item.parentId) {
-      const parent = itemMap.get(item.parentId)
-      const current = itemMap.get(item.id)
-      if (parent && current) {
-        parent.children!.push(current)
-      }
-    }
-  })
-
-  // Return only root items (those with no parent)
-  return flatList.filter((item) => item.parentId === null).map((item) => itemMap.get(item.id)!)
 }

@@ -61,12 +61,18 @@ export default function Home() {
       <div className="max-w-2xl mx-auto">
         <div className="mb-8">
           <h1 className="text-3xl font-bold mb-2">Draggable Menu</h1>
-          <p className="text-muted-foreground">
-            Drag items to reorder, expand/collapse items with children, and remove items with the X button.
+          <p className="text-muted-foreground mb-4">
+            Drag items to reorder. Drop at the top/bottom edge to place before/after, or drop in the middle to nest as a
+            child.
           </p>
+          <div className="flex flex-wrap gap-2 text-sm">
+            <span className="px-2 py-1 bg-muted rounded">Drag to edges = reorder</span>
+            <span className="px-2 py-1 bg-muted rounded">Drag to center = nest inside</span>
+            <span className="px-2 py-1 bg-muted rounded">Click chevron = expand/collapse</span>
+          </div>
         </div>
 
-        <div className="bg-card rounded-lg border border-border p-6">
+        <div className="bg-card rounded-lg border border-border p-4">
           <DraggableMenu
             items={menuItems}
             onItemsChange={handleItemsChange}
@@ -75,7 +81,7 @@ export default function Home() {
             expandedItems={expandedItems}
             showDragHandle={true}
             showRemoveButton={true}
-            className="space-y-2"
+            className="space-y-1"
           />
         </div>
 
